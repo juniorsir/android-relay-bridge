@@ -302,9 +302,18 @@ class PrivateRelay:
         return None
 
     async def deliver_phone_response(self, data: Dict[str, Any], raw_text: str) -> None:
-        req_id = data.get("requestId") or data.get("reqId")
-        alt_id = data.get("reqId") if data.get("requestId") else None
-        entry = self.pop_pending(req_id, alt_id)
+        cands = [
+            data.get("reqId"),
+            data.get("requestId"),
+            data.get("id"),
+            data.get("client_req_id"),
+        ]
+        entry = None
+        for c in cands:
+            if c:
+                entry = self.pop_pending(str(c))
+                if entry:
+                    break
         if not entry:
             return
 
@@ -797,39 +806,47 @@ async def handle_cli_http(request: web.Request) -> web.Response:
     if relay.phone_ws is None or relay.phone_ws.closed:
         return web.json_response({"success": False, "error": "Phone offline"}, status=503)
 
-    req_id = f"req_{uuid.uuid4().hex[:12]}"
+    rpc_id = f"rpc_{uuid.uuid4().hex[:12]}"
+    client_req_id = payload.get("requestId") or payload.get("reqId")
+
     loop = asyncio.get_running_loop()
     fut: asyncio.Future[Dict[str, Any]] = loop.create_future()
 
-    registered = relay.register_request(req_id, fut, alt_id=req_id)
+    if client_req_id:
+        registered = relay.register_request(rpc_id, fut, alt_id=str(client_req_id))
+    else:
+        registered = relay.register_request(rpc_id, fut, alt_id=None)
+
     if not registered:
         return web.json_response({"success": False, "error": "Server busy"}, status=429)
 
     rpc_msg: Dict[str, Any] = {
+        **payload,
         "type": "HTTP_RPC",
         "endpoint": full_endpoint,
-        "requestId": req_id,
-        "reqId": req_id,
-        "token": extracted_token,
-        **payload
+        "reqId": rpc_id,
+        "token": extracted_token
     }
-    rpc_msg["type"] = "HTTP_RPC"
-    rpc_msg["endpoint"] = full_endpoint
-    rpc_msg["requestId"] = req_id
-    rpc_msg["reqId"] = req_id
-    rpc_msg["token"] = extracted_token
+
+    # For pair/login endpoints without a client requestId, do NOT inject requestId into rpc_msg.
+    # This ensures the phone app's generated pair requestId is not overwritten in AppContainer.kt line 1411.
+    is_login_endpoint = full_endpoint in ("/api/auth/login", "/api/security/pair/request", "/api/pair/request")
+    if client_req_id:
+        rpc_msg["requestId"] = str(client_req_id)
+    elif not is_login_endpoint:
+        rpc_msg["requestId"] = rpc_id
 
     try:
         await relay.phone_ws.send_str(json.dumps(rpc_msg))
         relay.last_phone_activity = time.time()
     except Exception:
-        relay.pop_pending(req_id)
+        relay.pop_pending(rpc_id, str(client_req_id) if client_req_id else None)
         return web.json_response({"success": False, "error": "Phone offline"}, status=503)
 
     try:
         result = await asyncio.wait_for(fut, timeout=REQUEST_TIMEOUT_HTTP)
     except asyncio.TimeoutError:
-        relay.pop_pending(req_id)
+        relay.pop_pending(rpc_id, str(client_req_id) if client_req_id else None)
         return web.json_response({"success": False, "error": "Gateway Timeout: Phone offline"}, status=504)
 
     err = str(result.get("error", ""))
