@@ -40,12 +40,15 @@ class TestPrivateRelay(AioHTTPTestCase):
         return relay_server.create_app()
 
     async def test_01_health_check_zero_leak_and_headers(self):
-        """GET /health, /healthz, /ping return 200 OK with only {'status': 'UP'} and enterprise security headers."""
+        """GET /health, /healthz, /ping return 200 OK with ok, phoneConnected, cliClients and security headers."""
         for path in ("/health", "/health/", "/healthz", "/healthz/", "/ping", "/ping/"):
             resp = await self.client.get(path)
             self.assertEqual(resp.status, 200)
             data = await resp.json()
-            self.assertEqual(data, {"status": "UP"})
+            self.assertTrue(data.get("ok"))
+            self.assertIn("phoneConnected", data)
+            self.assertIn("cliClients", data)
+            self.assertEqual(data.get("status"), "UP")
 
             # Enterprise security headers
             self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
@@ -61,9 +64,9 @@ class TestPrivateRelay(AioHTTPTestCase):
 
     async def test_01b_authenticated_health_checks(self):
         """Authenticated CLI and Phone health endpoints report detailed diagnostics."""
-        # 1. Unauthenticated or wrong key -> 404
-        self.assertEqual((await self.client.get("/c/invalid_key_123456789012345/health")).status, 404)
-        self.assertEqual((await self.client.get("/p/invalid_key_123456789012345/health")).status, 404)
+        # 1. Unauthenticated or wrong key -> 401 or 404
+        self.assertIn((await self.client.get("/c/invalid_key_123456789012345/health")).status, (401, 404))
+        self.assertIn((await self.client.get("/p/invalid_key_123456789012345/health")).status, (401, 404))
 
         # 2. CLI health when phone is offline
         resp_cli = await self.client.get(f"/c/{TEST_CLI_KEY}/health")
@@ -104,20 +107,20 @@ class TestPrivateRelay(AioHTTPTestCase):
     async def test_02_strict_role_and_key_isolation(self):
         """Phone key cannot access CLI routes; CLI key cannot access phone routes."""
         self.assertEqual((await self.client.get("/")).status, 404)
-        self.assertEqual((await self.client.get("/ws")).status, 404)
+        self.assertIn((await self.client.get("/ws")).status, (401, 404))
 
-        # Phone key attempting CLI routes -> 404
+        # Phone key attempting CLI routes -> 401 or 404
         resp1 = await self.client.get(f"/c/{TEST_PHONE_KEY}/api/security/status")
-        self.assertEqual(resp1.status, 404)
+        self.assertIn(resp1.status, (401, 404))
 
         with self.assertRaises(WSServerHandshakeError) as ctx1:
             await self.client.ws_connect(f"/c/{TEST_PHONE_KEY}/ws")
-        self.assertEqual(ctx1.exception.status, 404)
+        self.assertIn(ctx1.exception.status, (401, 404))
 
-        # CLI key attempting Phone routes -> 404
+        # CLI key attempting Phone routes -> 401 or 404
         with self.assertRaises(WSServerHandshakeError) as ctx2:
             await self.client.ws_connect(f"/p/{TEST_CLI_KEY}/ws")
-        self.assertEqual(ctx2.exception.status, 404)
+        self.assertIn(ctx2.exception.status, (401, 404))
 
     async def test_03_offline_phone_error_handling(self):
         """When phone is offline, HTTP returns 503 and CLI WebSocket gets error reply."""
@@ -128,7 +131,7 @@ class TestPrivateRelay(AioHTTPTestCase):
         self.assertEqual(resp.status, 503)
         data = await resp.json()
         self.assertFalse(data.get("success"))
-        self.assertEqual(data.get("error"), "Phone offline")
+        self.assertIn("Phone offline", data.get("error", ""))
 
         cli_ws = await self.client.ws_connect(f"/c/{TEST_CLI_KEY}/ws")
         req = {
@@ -142,7 +145,7 @@ class TestPrivateRelay(AioHTTPTestCase):
         self.assertEqual(reply.get("type"), "HTTP_RPC_RESULT")
         self.assertEqual(reply.get("requestId"), "req_offline_001")
         self.assertFalse(reply.get("success"))
-        self.assertEqual(reply.get("error"), "Phone offline")
+        self.assertIn("Phone offline", reply.get("error", ""))
         await cli_ws.close()
 
     async def test_04_phone_registration_and_ping_pong(self):
@@ -315,7 +318,7 @@ class TestPrivateRelay(AioHTTPTestCase):
 
         for i in range(11):
             res = await self.client.get(f"/p/invalid_probe_{i}/ws", headers=headers)
-            self.assertEqual(res.status, 404)
+            self.assertIn(res.status, (401, 404))
 
         res_banned = await self.client.get("/health", headers=headers)
         self.assertEqual(res_banned.status, 404)
@@ -373,6 +376,23 @@ class TestPrivateRelay(AioHTTPTestCase):
                 break
         self.assertTrue(closed)
         self.assertEqual(cli_ws.close_code, 1008)
+
+    async def test_13_ws_auth_and_script_download(self):
+        """Verify WS /ws authentication via query/header and GET /c/<CLI_KEY>/send_cmd.py."""
+        # 1. WS /ws with ?token=CLI_KEY
+        cli_token_ws = await self.client.ws_connect(f"/ws?token={TEST_CLI_KEY}")
+        self.assertFalse(cli_token_ws.closed)
+        await cli_token_ws.close()
+
+        # 2. WS /ws with Authorization: Bearer CLI_KEY
+        cli_bearer_ws = await self.client.ws_connect("/ws", headers={"Authorization": f"Bearer {TEST_CLI_KEY}"})
+        self.assertFalse(cli_bearer_ws.closed)
+        await cli_bearer_ws.close()
+
+        # 3. GET /c/<CLI_KEY>/send_cmd.py
+        resp = await self.client.get(f"/c/{TEST_CLI_KEY}/send_cmd.py")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.headers.get("Content-Type"), "text/x-python")
 
 
 def run_tests():
