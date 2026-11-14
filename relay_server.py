@@ -47,6 +47,7 @@ WS_PING_RATE_LIMIT = 5                   # Max WebSocket PING frames/sec per cli
 
 PHONE_KEY = os.environ.get("PHONE_KEY", "").strip()
 CLI_KEY = os.environ.get("CLI_KEY", "").strip()
+SERVER_START_TIME = time.time()
 
 
 def validate_key(name: str, key: str) -> None:
@@ -240,7 +241,7 @@ class PrivateRelay:
     def __init__(self, shield: ProbeShield):
         self.shield = shield
         self.phone_ws: Optional[web.WebSocketResponse] = None
-        self.last_phone_activity: float = time.time()
+        self.last_phone_activity: float = 0.0
         self.active_cli_sockets: Set[web.WebSocketResponse] = set()
         self.pending_requests: Dict[str, PendingRequest] = {}
         self.heartbeat_task: Optional[asyncio.Task] = None
@@ -411,6 +412,65 @@ async def handle_health(request: web.Request) -> web.Response:
     if not shield.check_health_rate(ip):
         return web.Response(status=429, text="Too Many Requests")
     return web.json_response({"status": "UP"}, status=200)
+
+
+async def handle_cli_health(request: web.Request) -> web.Response:
+    """
+    Authenticated CLI health & bridge diagnostics probe.
+    Requires valid CLI_KEY.
+    Returns relay uptime, phone WebSocket connectivity, and active sessions.
+    """
+    key = request.match_info.get("key", "")
+    shield: ProbeShield = request.app["shield"]
+    ip = get_client_ip(request)
+
+    if not check_cli_key(key):
+        shield.record_failure(ip)
+        return web.Response(status=404, text="Not Found")
+
+    relay: PrivateRelay = request.app["relay"]
+    now = time.time()
+    phone_online = (relay.phone_ws is not None and not relay.phone_ws.closed)
+    phone_last_seen = round(now - relay.last_phone_activity, 1) if relay.last_phone_activity > 0 else None
+
+    return web.json_response(
+        {
+            "status": "UP",
+            "role": "cli",
+            "phone_connected": phone_online,
+            "phone_last_seen_sec": phone_last_seen,
+            "active_cli_count": len([ws for ws in relay.active_cli_sockets if not ws.closed]),
+            "uptime_sec": int(now - SERVER_START_TIME),
+            "pending_requests_count": len(relay.pending_requests),
+            "timestamp": now,
+        },
+        status=200
+    )
+
+
+async def handle_phone_health(request: web.Request) -> web.Response:
+    """
+    Authenticated Phone health probe.
+    Requires valid PHONE_KEY.
+    """
+    key = request.match_info.get("key", "")
+    shield: ProbeShield = request.app["shield"]
+    ip = get_client_ip(request)
+
+    if not check_phone_key(key):
+        shield.record_failure(ip)
+        return web.Response(status=404, text="Not Found")
+
+    now = time.time()
+    return web.json_response(
+        {
+            "status": "UP",
+            "role": "phone",
+            "uptime_sec": int(now - SERVER_START_TIME),
+            "timestamp": now,
+        },
+        status=200
+    )
 
 
 async def handle_phone_ws(request: web.Request) -> web.WebSocketResponse:
@@ -815,11 +875,33 @@ def create_app() -> web.Application:
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
 
-    # 1. Public Health Check
+    # 1. Public Health Check (Render, Uptime monitors - zero metadata leaked)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/health/", handle_health)
+    app.router.add_get("/healthz", handle_health)
+    app.router.add_get("/healthz/", handle_health)
+    app.router.add_get("/ping", handle_health)
+    app.router.add_get("/ping/", handle_health)
 
-    # 2. Phone-Only WebSocket (/p/{PHONE_KEY}/ws)
+    # 2. Authenticated CLI Health & Diagnostics (/c/{CLI_KEY}/health)
+    app.router.add_get(r"/c/{key}/health", handle_cli_health)
+    app.router.add_get(r"/c/{key}/health/", handle_cli_health)
+    app.router.add_get(r"/c/{key}/status", handle_cli_health)
+    app.router.add_get(r"/c/{key}/status/", handle_cli_health)
+    app.router.add_get(r"/c/{key}/ping", handle_cli_health)
+    app.router.add_get(r"/c/{key}/ping/", handle_cli_health)
+    app.router.add_get(r"/c/{key}/api/health", handle_cli_health)
+    app.router.add_get(r"/c/{key}/api/health/", handle_cli_health)
+
+    # 3. Authenticated Phone Health (/p/{PHONE_KEY}/health)
+    app.router.add_get(r"/p/{key}/health", handle_phone_health)
+    app.router.add_get(r"/p/{key}/health/", handle_phone_health)
+    app.router.add_get(r"/p/{key}/ping", handle_phone_health)
+    app.router.add_get(r"/p/{key}/ping/", handle_phone_health)
+    app.router.add_get(r"/p/{key}/status", handle_phone_health)
+    app.router.add_get(r"/p/{key}/status/", handle_phone_health)
+
+    # 4. Phone-Only WebSocket (/p/{PHONE_KEY}/ws)
     app.router.add_get(r"/p/{key}/ws", handle_phone_ws)
     app.router.add_get(r"/p/{key}/ws/", handle_phone_ws)
     app.router.add_get(r"/p/{key}", handle_phone_ws)

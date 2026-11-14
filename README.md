@@ -48,7 +48,10 @@ python send_cmd.py inspect
 
 ## 🔒 Strict Security Hardening Overview
 
-* **Zero Public Attack Surface**: Only `GET /health` is public (returns `200 OK` `{"status": "UP"}` with zero metadata, rate-limited to 60 req/min).
+* **Zero Public Attack Surface**: Only `GET /health` (`/healthz`, `/ping`) is public (returns `200 OK` `{"status": "UP"}` with zero metadata, rate-limited to 60 req/min).
+* **Authenticated Diagnostics & Health**:
+  * **CLI Health** (`GET /c/{CLI_KEY}/health` or `/c/{CLI_KEY}/status`): Returns real-time relay uptime, phone WebSocket connectivity status (`phone_connected: true/false`), phone last-seen elapsed seconds, and active CLI session counts.
+  * **Phone Health** (`GET /p/{PHONE_KEY}/health`): Returns relay health for the phone client.
 * **Strict Role Isolation**:
   * **Phone WebSocket** (`/p/{PHONE_KEY}/ws`): Max 1 connection; cannot act as CLI requester. Replaces stale phone connections cleanly on reconnect.
   * **CLI Gateway** (`/c/{CLI_KEY}/ws` and `/c/{CLI_KEY}/api/...`): Max 2 concurrent sockets (rejects excess with `429 Too Many Requests`); cannot impersonate the phone.

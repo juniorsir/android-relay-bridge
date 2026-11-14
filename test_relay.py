@@ -40,19 +40,66 @@ class TestPrivateRelay(AioHTTPTestCase):
         return relay_server.create_app()
 
     async def test_01_health_check_zero_leak_and_headers(self):
-        """GET /health returns 200 OK with only {'status': 'UP'} and enterprise security headers."""
-        resp = await self.client.get("/health")
-        self.assertEqual(resp.status, 200)
-        data = await resp.json()
-        self.assertEqual(data, {"status": "UP"})
+        """GET /health, /healthz, /ping return 200 OK with only {'status': 'UP'} and enterprise security headers."""
+        for path in ("/health", "/health/", "/healthz", "/healthz/", "/ping", "/ping/"):
+            resp = await self.client.get(path)
+            self.assertEqual(resp.status, 200)
+            data = await resp.json()
+            self.assertEqual(data, {"status": "UP"})
 
-        # Enterprise security headers
-        self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
-        self.assertEqual(resp.headers.get("X-Frame-Options"), "DENY")
-        self.assertIn("default-src 'none'", resp.headers.get("Content-Security-Policy", ""))
-        self.assertIn("max-age=31536000", resp.headers.get("Strict-Transport-Security", ""))
-        self.assertEqual(resp.headers.get("Referrer-Policy"), "no-referrer")
-        self.assertEqual(resp.headers.get("Server"), "Relay")
+            # Enterprise security headers
+            self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
+            self.assertEqual(resp.headers.get("X-Frame-Options"), "DENY")
+            self.assertIn("default-src 'none'", resp.headers.get("Content-Security-Policy", ""))
+            self.assertIn("max-age=31536000", resp.headers.get("Strict-Transport-Security", ""))
+            self.assertEqual(resp.headers.get("Referrer-Policy"), "no-referrer")
+            self.assertEqual(resp.headers.get("Server"), "Relay")
+
+        # HEAD /health
+        head_resp = await self.client.head("/health")
+        self.assertEqual(head_resp.status, 200)
+
+    async def test_01b_authenticated_health_checks(self):
+        """Authenticated CLI and Phone health endpoints report detailed diagnostics."""
+        # 1. Unauthenticated or wrong key -> 404
+        self.assertEqual((await self.client.get("/c/invalid_key_123456789012345/health")).status, 404)
+        self.assertEqual((await self.client.get("/p/invalid_key_123456789012345/health")).status, 404)
+
+        # 2. CLI health when phone is offline
+        resp_cli = await self.client.get(f"/c/{TEST_CLI_KEY}/health")
+        self.assertEqual(resp_cli.status, 200)
+        cli_data = await resp_cli.json()
+        self.assertEqual(cli_data.get("status"), "UP")
+        self.assertEqual(cli_data.get("role"), "cli")
+        self.assertFalse(cli_data.get("phone_connected"))
+        self.assertIsNone(cli_data.get("phone_last_seen_sec"))
+        self.assertIn("uptime_sec", cli_data)
+
+        # Also test /c/{key}/status and /c/{key}/api/health
+        resp_status = await self.client.get(f"/c/{TEST_CLI_KEY}/status")
+        self.assertEqual(resp_status.status, 200)
+        resp_api_health = await self.client.get(f"/c/{TEST_CLI_KEY}/api/health")
+        self.assertEqual(resp_api_health.status, 200)
+
+        # 3. Phone connects, CLI health reflects phone_connected: True
+        phone_ws = await self.client.ws_connect(f"/p/{TEST_PHONE_KEY}/ws")
+        await phone_ws.send_str(json.dumps({"type": "HELLO"}))
+        await asyncio.sleep(0.05)
+
+        resp_cli_online = await self.client.get(f"/c/{TEST_CLI_KEY}/health")
+        self.assertEqual(resp_cli_online.status, 200)
+        online_data = await resp_cli_online.json()
+        self.assertTrue(online_data.get("phone_connected"))
+        self.assertIsNotNone(online_data.get("phone_last_seen_sec"))
+
+        # 4. Phone health endpoint
+        resp_phone = await self.client.get(f"/p/{TEST_PHONE_KEY}/health")
+        self.assertEqual(resp_phone.status, 200)
+        phone_data = await resp_phone.json()
+        self.assertEqual(phone_data.get("status"), "UP")
+        self.assertEqual(phone_data.get("role"), "phone")
+
+        await phone_ws.close()
 
     async def test_02_strict_role_and_key_isolation(self):
         """Phone key cannot access CLI routes; CLI key cannot access phone routes."""
