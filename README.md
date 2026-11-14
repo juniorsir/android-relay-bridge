@@ -1,5 +1,7 @@
 # Private 1-to-1 Android ⇄ Termux Relay Server (Strict & Hardened)
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/juniorsir/android-relay-bridge)
+
 A minimal, private 1-to-1 cloud bridge designed for deployment on Render. Its sole purpose is connecting a single Android Companion phone app to a single Termux CLI client (`send_cmd.py`) over the internet with zero persistence, zero payload logging, and fail-closed key isolation.
 
 ---
