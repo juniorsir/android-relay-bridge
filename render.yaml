@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: private-relay-bridge
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python relay_server.py"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PHONE_KEY
+        generateValue: true
+      - key: CLI_KEY
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: 3.11.9
